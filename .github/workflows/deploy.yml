@@ -1,0 +1,137 @@
+# Multi-Environment Deploy
+# Build once -> one artifact -> promote the SAME artifact to every environment.
+#   develop branch : build + deploy to Dev automatically
+#   main branch    : build -> deploy to QA (approval) -> deploy to Production (approval)
+# All jobs run on a self-hosted runner; deploys go over SSH to three
+# separate environment accounts (dev / qa / prod) on the target machine.
+name: Multi-Environment Deploy
+
+on:
+  push:
+    branches: [ develop, main ]
+  workflow_dispatch:
+    inputs:
+      target_env:
+        description: 'Deploy target'
+        required: true
+        type: choice
+        options: [ dev, qa, production ]
+
+concurrency:
+  group: deploy-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build Once
+    runs-on: [ self-hosted ]
+    outputs:
+      version: ${{ steps.ver.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install and test
+        run: |
+          npm install
+          npm test
+
+      - name: Set version
+        id: ver
+        run: echo "version=1.0.${{ github.run_number }}" >> "$GITHUB_OUTPUT"
+
+      - name: Create artifact (once)
+        run: |
+          mkdir release
+          cp app.js package.json release/
+          tar -czf "app-${{ steps.ver.outputs.version }}.tar.gz" release
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-build
+          path: app-${{ steps.ver.outputs.version }}.tar.gz
+          retention-days: 7
+
+  deploy-dev:
+    name: Deploy to Dev (auto)
+    needs: build
+    if: github.ref == 'refs/heads/develop' || inputs.target_env == 'dev'
+    runs-on: [ self-hosted ]
+    environment:
+      name: dev
+    steps:
+      - name: Download the same artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: app-build
+
+      - name: Deploy over SSH
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.SERVER_HOST }}
+          username: ${{ secrets.SERVER_USER }}
+          key: ${{ secrets.SERVER_SSH_KEY }}
+          script: |
+            mkdir -p ~/app-dev
+            tar -xzf ${{ github.workspace }}/app-${{ needs.build.outputs.version }}.tar.gz -C ~/app-dev --strip-components=1
+            echo "DEV deploy complete: version ${{ needs.build.outputs.version }}" | tee ~/app-dev/DEPLOYED.txt
+            date >> ~/app-dev/DEPLOYED.txt
+
+  deploy-qa:
+    name: Deploy to QA (approval)
+    needs: [ build, deploy-dev ]
+    if: |
+      always() && needs.build.result == 'success' &&
+      (github.ref == 'refs/heads/main' || inputs.target_env == 'qa' || inputs.target_env == 'production')
+    runs-on: [ self-hosted ]
+    environment:
+      name: qa
+    steps:
+      - name: Download the same artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: app-build
+
+      - name: Deploy over SSH
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.SERVER_HOST }}
+          username: ${{ secrets.SERVER_USER }}
+          key: ${{ secrets.SERVER_SSH_KEY }}
+          script: |
+            mkdir -p ~/app-qa
+            tar -xzf ${{ github.workspace }}/app-${{ needs.build.outputs.version }}.tar.gz -C ~/app-qa --strip-components=1
+            echo "QA deploy complete: version ${{ needs.build.outputs.version }}" | tee ~/app-qa/DEPLOYED.txt
+            date >> ~/app-qa/DEPLOYED.txt
+
+  deploy-prod:
+    name: Deploy to Production (approval)
+    needs: [ build, deploy-qa ]
+    if: |
+      always() && needs.build.result == 'success' && needs.deploy-qa.result == 'success' &&
+      (github.ref == 'refs/heads/main' || inputs.target_env == 'production')
+    runs-on: [ self-hosted ]
+    environment:
+      name: production
+    steps:
+      - name: Download the same artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: app-build
+
+      - name: Deploy over SSH
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.SERVER_HOST }}
+          username: ${{ secrets.SERVER_USER }}
+          key: ${{ secrets.SERVER_SSH_KEY }}
+          script: |
+            mkdir -p ~/app-prod
+            tar -xzf ${{ github.workspace }}/app-${{ needs.build.outputs.version }}.tar.gz -C ~/app-prod --strip-components=1
+            echo "PRODUCTION deploy complete: version ${{ needs.build.outputs.version }}" | tee ~/app-prod/DEPLOYED.txt
+            date >> ~/app-prod/DEPLOYED.txt
