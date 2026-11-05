@@ -4,6 +4,8 @@
 #   main branch    : build -> deploy to QA (approval) -> deploy to Production (approval)
 # All jobs run on a self-hosted runner; deploys go over SSH to three
 # separate environment accounts (dev / qa / prod) on the target machine.
+# The built artifact is kept in a local store (/tmp/artifact-store) on the
+# runner machine and that same file is promoted to every environment.
 name: Multi-Environment Deploy
 
 on:
@@ -50,12 +52,10 @@ jobs:
           cp app.js package.json release/
           tar -czf "app-${{ steps.ver.outputs.version }}.tar.gz" release
 
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: app-build
-          path: app-${{ steps.ver.outputs.version }}.tar.gz
-          retention-days: 7
+      - name: Keep the artifact on this machine
+        run: |
+          mkdir -p /tmp/artifact-store
+          cp "app-${{ steps.ver.outputs.version }}.tar.gz" /tmp/artifact-store/
 
   deploy-dev:
     name: Deploy to Dev (auto)
@@ -65,11 +65,6 @@ jobs:
     environment:
       name: dev
     steps:
-      - name: Download the same artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: app-build
-
       - name: Deploy over SSH
         uses: appleboy/ssh-action@v1.0.3
         with:
@@ -78,7 +73,7 @@ jobs:
           key: ${{ secrets.SERVER_SSH_KEY }}
           script: |
             mkdir -p ~/app-dev
-            tar -xzf ${{ github.workspace }}/app-${{ needs.build.outputs.version }}.tar.gz -C ~/app-dev --strip-components=1
+            tar -xzf /tmp/artifact-store/app-${{ needs.build.outputs.version }}.tar.gz -C ~/app-dev --strip-components=1
             echo "DEV deploy complete: version ${{ needs.build.outputs.version }}" | tee ~/app-dev/DEPLOYED.txt
             date >> ~/app-dev/DEPLOYED.txt
 
@@ -92,11 +87,6 @@ jobs:
     environment:
       name: qa
     steps:
-      - name: Download the same artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: app-build
-
       - name: Deploy over SSH
         uses: appleboy/ssh-action@v1.0.3
         with:
@@ -105,7 +95,7 @@ jobs:
           key: ${{ secrets.SERVER_SSH_KEY }}
           script: |
             mkdir -p ~/app-qa
-            tar -xzf ${{ github.workspace }}/app-${{ needs.build.outputs.version }}.tar.gz -C ~/app-qa --strip-components=1
+            tar -xzf /tmp/artifact-store/app-${{ needs.build.outputs.version }}.tar.gz -C ~/app-qa --strip-components=1
             echo "QA deploy complete: version ${{ needs.build.outputs.version }}" | tee ~/app-qa/DEPLOYED.txt
             date >> ~/app-qa/DEPLOYED.txt
 
@@ -119,11 +109,6 @@ jobs:
     environment:
       name: production
     steps:
-      - name: Download the same artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: app-build
-
       - name: Deploy over SSH
         uses: appleboy/ssh-action@v1.0.3
         with:
@@ -132,6 +117,6 @@ jobs:
           key: ${{ secrets.SERVER_SSH_KEY }}
           script: |
             mkdir -p ~/app-prod
-            tar -xzf ${{ github.workspace }}/app-${{ needs.build.outputs.version }}.tar.gz -C ~/app-prod --strip-components=1
+            tar -xzf /tmp/artifact-store/app-${{ needs.build.outputs.version }}.tar.gz -C ~/app-prod --strip-components=1
             echo "PRODUCTION deploy complete: version ${{ needs.build.outputs.version }}" | tee ~/app-prod/DEPLOYED.txt
             date >> ~/app-prod/DEPLOYED.txt
