@@ -1,0 +1,1 @@
+{"description":"Sample app for a GitHub Actions multi-environment deployment pipeline","main":"app.js","name":"multi-env-app","scripts":{"start":"node app.js","test":"node test.js"},"version":"1.0.0"}
