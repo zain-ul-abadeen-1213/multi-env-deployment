@@ -2,10 +2,12 @@
 # Build once -> one artifact -> promote the SAME artifact to every environment.
 #   develop branch : build + deploy to Dev automatically
 #   main branch    : build -> deploy to QA (approval) -> deploy to Production (approval)
-# All jobs run on a self-hosted runner; deploys go over SSH to three
-# separate environment accounts (dev / qa / prod) on the target machine.
-# The built artifact is kept in a local store (/tmp/artifact-store) on the
-# runner machine and that same file is promoted to every environment.
+# Everything runs on a self-hosted runner with shell steps only — no action
+# downloads — so the pipeline never depends on a fast internet link.
+# Node.js is provisioned once on the runner (~/node20, resumable download)
+# and reused by every run. The built artifact is kept in a local store
+# (/tmp/artifact-store) on the runner machine and that same file is promoted
+# to every environment. Deploys go over SSH using each environment's secrets.
 name: Multi-Environment Deploy
 
 on:
@@ -29,13 +31,31 @@ jobs:
     runs-on: [ self-hosted ]
     outputs:
       version: ${{ steps.ver.outputs.version }}
+    defaults:
+      run:
+        working-directory: src
     steps:
-      - uses: actions/checkout@v4
+      - name: Get the code
+        working-directory: ${{ github.workspace }}
+        run: |
+          if [ -d src/.git ]; then
+            git -C src fetch --depth 1 origin "${{ github.ref_name }}"
+            git -C src checkout -f FETCH_HEAD
+          else
+            rm -rf src
+            git clone --depth 1 --branch "${{ github.ref_name }}" https://github.com/zain-ul-abadeen-1213/multi-env-deployment.git src
+          fi
 
-      - name: Set up Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: '20'
+      - name: Use a local Node.js 20
+        run: |
+          NODE_DIR="$HOME/node20"
+          if [ ! -x "$NODE_DIR/bin/node" ]; then
+            curl -fsSL --retry 5 --retry-all-errors -C - -o /tmp/node.tar.xz https://nodejs.org/dist/v20.18.1/node-v20.18.1-linux-x64.tar.xz
+            mkdir -p "$NODE_DIR"
+            tar -xJf /tmp/node.tar.xz -C "$NODE_DIR" --strip-components=1
+          fi
+          echo "$NODE_DIR/bin" >> "$GITHUB_PATH"
+          "$NODE_DIR/bin/node" --version
 
       - name: Install and test
         run: |
@@ -48,7 +68,7 @@ jobs:
 
       - name: Create artifact (once)
         run: |
-          mkdir release
+          mkdir -p release
           cp app.js package.json release/
           tar -czf "app-${{ steps.ver.outputs.version }}.tar.gz" release
 
@@ -66,16 +86,16 @@ jobs:
       name: dev
     steps:
       - name: Deploy over SSH
-        uses: appleboy/ssh-action@v1.0.3
-        with:
-          host: ${{ secrets.SERVER_HOST }}
-          username: ${{ secrets.SERVER_USER }}
-          key: ${{ secrets.SERVER_SSH_KEY }}
-          script: |
-            mkdir -p ~/app-dev
-            tar -xzf /tmp/artifact-store/app-${{ needs.build.outputs.version }}.tar.gz -C ~/app-dev --strip-components=1
-            echo "DEV deploy complete: version ${{ needs.build.outputs.version }}" | tee ~/app-dev/DEPLOYED.txt
-            date >> ~/app-dev/DEPLOYED.txt
+        env:
+          SSH_KEY: ${{ secrets.SERVER_SSH_KEY }}
+          HOST: ${{ secrets.SERVER_HOST }}
+          USER_NAME: ${{ secrets.SERVER_USER }}
+        run: |
+          KEY_FILE="$(mktemp)"
+          printf '%s\n' "$SSH_KEY" > "$KEY_FILE"
+          chmod 600 "$KEY_FILE"
+          ssh -i "$KEY_FILE" -o StrictHostKeyChecking=accept-new "$USER_NAME@$HOST" "mkdir -p ~/app-dev && tar -xzf /tmp/artifact-store/app-${{ needs.build.outputs.version }}.tar.gz -C ~/app-dev --strip-components=1 && echo 'DEV deploy complete: version ${{ needs.build.outputs.version }}' | tee ~/app-dev/DEPLOYED.txt && date >> ~/app-dev/DEPLOYED.txt"
+          rm -f "$KEY_FILE"
 
   deploy-qa:
     name: Deploy to QA (approval)
@@ -88,16 +108,16 @@ jobs:
       name: qa
     steps:
       - name: Deploy over SSH
-        uses: appleboy/ssh-action@v1.0.3
-        with:
-          host: ${{ secrets.SERVER_HOST }}
-          username: ${{ secrets.SERVER_USER }}
-          key: ${{ secrets.SERVER_SSH_KEY }}
-          script: |
-            mkdir -p ~/app-qa
-            tar -xzf /tmp/artifact-store/app-${{ needs.build.outputs.version }}.tar.gz -C ~/app-qa --strip-components=1
-            echo "QA deploy complete: version ${{ needs.build.outputs.version }}" | tee ~/app-qa/DEPLOYED.txt
-            date >> ~/app-qa/DEPLOYED.txt
+        env:
+          SSH_KEY: ${{ secrets.SERVER_SSH_KEY }}
+          HOST: ${{ secrets.SERVER_HOST }}
+          USER_NAME: ${{ secrets.SERVER_USER }}
+        run: |
+          KEY_FILE="$(mktemp)"
+          printf '%s\n' "$SSH_KEY" > "$KEY_FILE"
+          chmod 600 "$KEY_FILE"
+          ssh -i "$KEY_FILE" -o StrictHostKeyChecking=accept-new "$USER_NAME@$HOST" "mkdir -p ~/app-qa && tar -xzf /tmp/artifact-store/app-${{ needs.build.outputs.version }}.tar.gz -C ~/app-qa --strip-components=1 && echo 'QA deploy complete: version ${{ needs.build.outputs.version }}' | tee ~/app-qa/DEPLOYED.txt && date >> ~/app-qa/DEPLOYED.txt"
+          rm -f "$KEY_FILE"
 
   deploy-prod:
     name: Deploy to Production (approval)
@@ -110,13 +130,13 @@ jobs:
       name: production
     steps:
       - name: Deploy over SSH
-        uses: appleboy/ssh-action@v1.0.3
-        with:
-          host: ${{ secrets.SERVER_HOST }}
-          username: ${{ secrets.SERVER_USER }}
-          key: ${{ secrets.SERVER_SSH_KEY }}
-          script: |
-            mkdir -p ~/app-prod
-            tar -xzf /tmp/artifact-store/app-${{ needs.build.outputs.version }}.tar.gz -C ~/app-prod --strip-components=1
-            echo "PRODUCTION deploy complete: version ${{ needs.build.outputs.version }}" | tee ~/app-prod/DEPLOYED.txt
-            date >> ~/app-prod/DEPLOYED.txt
+        env:
+          SSH_KEY: ${{ secrets.SERVER_SSH_KEY }}
+          HOST: ${{ secrets.SERVER_HOST }}
+          USER_NAME: ${{ secrets.SERVER_USER }}
+        run: |
+          KEY_FILE="$(mktemp)"
+          printf '%s\n' "$SSH_KEY" > "$KEY_FILE"
+          chmod 600 "$KEY_FILE"
+          ssh -i "$KEY_FILE" -o StrictHostKeyChecking=accept-new "$USER_NAME@$HOST" "mkdir -p ~/app-prod && tar -xzf /tmp/artifact-store/app-${{ needs.build.outputs.version }}.tar.gz -C ~/app-prod --strip-components=1 && echo 'PRODUCTION deploy complete: version ${{ needs.build.outputs.version }}' | tee ~/app-prod/DEPLOYED.txt && date >> ~/app-prod/DEPLOYED.txt"
+          rm -f "$KEY_FILE"
